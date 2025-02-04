@@ -14,7 +14,7 @@ Multi-exposure fusion is a high dynamic range (HDR) imaging technique that combi
 
 ## <u>Reconstruction Network</u>
 
-<p align="center"><img src="figs/recon_net.PNG" width="900"></p>
+<p align="center"><img src="figs/recon_net.png" width="900"></p>
 
 ## Experimental Results
 
