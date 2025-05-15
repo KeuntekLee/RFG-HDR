@@ -359,7 +359,57 @@ class GlobalMergingUnit(nn.Module):
         #print(input_feats[0].shape)
         global_merged = torch.sum(torch.stack(input_feats, dim=1) * global_attention_vectors, dim=1)
         return global_merged
+        
+class MultiscaleAlign(nn.Module):
+    def __init__(self, dim):
+        super(MultiscaleAlign, self).__init__()
+        self.act = nn.LeakyReLU()
+        self.reduce = nn.Conv2d(128, dim,kernel_size=1)
+        self.down1_ref = nn.Conv2d(dim, dim, kernel_size=3, stride=2, padding=1)
+        self.down1_nonref = nn.Conv2d(dim, dim, kernel_size=3, stride=2, padding=1)
 
+        self.down2_ref = nn.Conv2d(dim, dim, kernel_size=3, stride=2, padding=1)
+        self.down2_nonref = nn.Conv2d(dim, dim, kernel_size=3, stride=2, padding=1)
+        #self.upsample_x2 = F.interpolate(scale_factor=2)
+        #self.upsample_x4 = F.interpolate(scale_factor=4)
+        #self.downsample_x2 = F.interpolate(scale_factor=0.5)
+        #self.downsample_x4 = F.interpolate(scale_factor=0.25)
+
+        #self.conv_inp_local = nn.Conv2d(dim*2, dim, kernel_size=3, padding=1)
+        self.conv_nonref = nn.Conv2d(dim*2, dim, kernel_size=3, padding=1)
+        self.conv_ref = nn.Conv2d(dim*2, dim, kernel_size=3, padding=1)
+        self.conv_mask_x4 = nn.Conv2d(dim*2, dim, kernel_size=3, padding=1)
+        self.conv_mask_x2 = nn.Conv2d(dim*2, dim, kernel_size=3, padding=1)
+        self.conv_mask_x1 = nn.Conv2d(dim*2, dim, kernel_size=3, padding=1)
+        self.conv_x2 = nn.Conv2d(dim*2, dim, kernel_size=3, padding=1)
+        self.conv_x1 = nn.Conv2d(dim*2, dim, kernel_size=3, padding=1)
+        #self.reduce_conv = nn.Conv2d(64,dim,kernel_size=1)
+    def forward(self, inp, ref, local_feat_inp, local_feat_ref):
+        local_feat_inp = self.reduce(local_feat_inp)
+        local_feat_ref = self.reduce(local_feat_ref)
+
+        inp_down_x2 = self.act(self.down1_nonref(inp))
+        ref_down_x2 = self.act((self.down1_ref(ref)))
+        inp_down_x4 = self.act(self.down2_nonref(inp_down_x2))
+        ref_down_x4 = self.act(self.down2_ref(ref_down_x2))
+
+        x4_nonref = self.act(self.conv_nonref(torch.cat([inp_down_x4,local_feat_inp],dim=1)))
+        x4_ref = self.act(self.conv_ref(torch.cat([ref_down_x4,local_feat_ref],dim=1)))
+
+        x4_mask = self.act(self.conv_mask_x4(torch.cat([x4_ref,x4_nonref],dim=1)))
+        x4_mask = F.interpolate(x4_mask, scale_factor=2)
+
+        x2_nonref = self.act(self.conv_x2(torch.cat([inp_down_x2, x4_mask],dim=1)))
+        x2_mask = self.act(self.conv_mask_x2(torch.cat([ref_down_x2,x2_nonref],dim=1)))
+        x2_mask = F.interpolate(x2_mask, scale_factor=2)
+
+        x_nonref = self.act(self.conv_x1(torch.cat([inp, x2_mask],dim=1)))
+        x_mask = self.conv_mask_x1(torch.cat([ref,x_nonref],dim=1))
+
+
+        feat = F.sigmoid(x_mask)
+        return inp * feat
+        
 class SpatialAttention(nn.Module):
     def __init__(self, dim):
         super(SpatialAttention, self).__init__()
@@ -391,8 +441,8 @@ class RFGViT(nn.Module):
         self.patch_embed2 = OverlapPatchEmbed(inp_channels, dim)
         self.patch_embed3 = OverlapPatchEmbed(inp_channels, dim)
 
-        self.sp_att1 = SpatialAttention(dim)
-        self.sp_att3 = SpatialAttention(dim)
+        self.sp_att1 = MultiscaleAlign(dim)
+        self.sp_att3 = MultiscaleAlign(dim)
 
         self.encoder_level1_1 = nn.Sequential(*[TransformerBlock_EN(dim=dim, num_heads=2, ffn_expansion_factor=ffn_expansion_factor, bias=bias, LayerNorm_type=LayerNorm_type) for i in range(num_blocks[0])])
         self.encoder_level1_2 = nn.Sequential(*[TransformerBlock_EN(dim=dim, num_heads=2, ffn_expansion_factor=ffn_expansion_factor, bias=bias, LayerNorm_type=LayerNorm_type) for i in range(num_blocks[0])])
@@ -445,26 +495,32 @@ class RFGViT(nn.Module):
         F2_1 = self.patch_embed2(x2)
         F3_1 = self.patch_embed3(x3)
 
-        F1_1 = self.sp_att1(F1_1, F2_1)
-        F3_1 = self.sp_att3(F3_1, F2_1)
+        F1_1 = self.sp_att1(F1_1, F2_1, local_feats[0], local_feats[1])
+        F3_1 = self.sp_att3(F3_1, F2_1, local_feats[2], local_feats[1])
 
 
-        F1_1, L1_1, G1_1 = self.encoder_level1_1(F1_1)
-        F2_1, L2_1, G2_1 = self.encoder_level1_2(F2_1)
-        F3_1, L3_1, G3_1 = self.encoder_level1_3(F3_1)
+        F1_1 = self.encoder_level1_1(F1_1)
+        G1_1 = F1_1
+        F2_1 = self.encoder_level1_2(F2_1)
+        G2_1 = F2_1
+        F3_1 = self.encoder_level1_3(F3_1)
+        G3_1 = F3_1
 
-        LM_1 = self.local_merge1([L1_1,L2_1,L3_1], local_feats)
+        #LM_1 = self.local_merge1([L1_1,L2_1,L3_1], local_feats)
         GM_1 = self.global_merge1([G1_1,G2_1,G3_1], global_feats)
 
         F1_2 = self.down1_1(F1_1)
         F2_2 = self.down1_2(F2_1)
         F3_2 = self.down1_3(F3_1)
 
-        F1_2, L1_2, G1_2 = self.encoder_level2_1(F1_2)
-        F2_2, L2_2, G2_2 = self.encoder_level2_2(F2_2)
-        F3_2, L3_2, G3_2 = self.encoder_level2_3(F3_2)
+        F1_2 = self.encoder_level2_1(F1_2)
+        G1_2 = F1_2
+        F2_2 = self.encoder_level2_2(F2_2)
+        G2_2 = F2_2
+        F3_2 = self.encoder_level2_3(F3_2)
+        G3_2 = F3_2
 
-        LM_2 = self.local_merge2([L1_2,L2_2,L3_2], local_feats)
+        #LM_2 = self.local_merge2([L1_2,L2_2,L3_2], local_feats)
         GM_2 = self.global_merge2([G1_2,G2_2,G3_2], global_feats)
 
         F1_3 = self.down2_1(F1_2)
@@ -482,25 +538,25 @@ class RFGViT(nn.Module):
         # F2_3 = self.down3_2(F2_3)
         # F3_3 = self.down3_3(F3_3)
 
-        F1_3,_,_ = self.encoder_level3_1(F1_3)
-        F2_3,_,_ = self.encoder_level3_2(F2_3)
-        F3_3,_,_ = self.encoder_level3_3(F3_3)
+        F1_3 = self.encoder_level3_1(F1_3)
+        F2_3 = self.encoder_level3_2(F2_3)
+        F3_3 = self.encoder_level3_3(F3_3)
 
         FM_3 = F1_3+F2_3+F3_3
 
         for bottleneck in self.bottleneck:
-            FM_3,_,_ = bottleneck(FM_3)
+            FM_3 = bottleneck(FM_3)
         FM_3 = FM_3 + F2_3
         # FM_2 = self.up3(FM_3)
 
         # FM_3 = self.decoder_level3(FM_3, LM_3, GM_3)
 
         FM_2 = self.up2(FM_3)
-        FM_2 = self.decoder_level2(FM_2, LM_2, GM_2) + F2_2
+        FM_2 = self.decoder_level2(FM_2, GM_2) + F2_2
         FM_1 = self.up1(FM_2)
-        FM_1 = self.decoder_level1(FM_1, LM_1, GM_1) + F2_1
+        FM_1 = self.decoder_level1(FM_1, GM_1) + F2_1
         for refinement in self.refinement:
-            FM_1,_,_ = refinement(FM_1)
+            FM_1 = refinement(FM_1)
         out = self.output(FM_1)
         out = F.sigmoid(out)
         return out
