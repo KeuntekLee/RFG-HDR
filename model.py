@@ -5,6 +5,13 @@ from pdb import set_trace as stx
 import numbers
 
 from einops import rearrange
+
+#from dynamic_conv import DynamicConv
+
+
+##########################################################################
+## Layer Norm
+
 def to_3d(x):
     return rearrange(x, 'b c h w -> b (h w) c')
 
@@ -102,6 +109,8 @@ class RCAB(nn.Module):
         #x = x.permute(0,3,1,2)
         return x + y
 
+##########################################################################
+## Gated-Dconv Feed-Forward Network (GDFN)
 class FeedForward(nn.Module):
     def __init__(self, dim, ffn_expansion_factor, bias):
         super(FeedForward, self).__init__()
@@ -121,7 +130,6 @@ class FeedForward(nn.Module):
         x = self.project_out(x)
         return x
 
-
 class FeedForward_DE(nn.Module):
     def __init__(self, dim, ffn_expansion_factor, bias):
         super(FeedForward_DE, self).__init__()
@@ -130,10 +138,9 @@ class FeedForward_DE(nn.Module):
 
         self.project_in_x = nn.Conv2d(dim, hidden_features, kernel_size=1, bias=bias)
         self.project_in_y = nn.Conv2d(dim, hidden_features, kernel_size=1, bias=bias)
-
         self.dwconv = nn.Conv2d(hidden_features*2, hidden_features*2, kernel_size=3, stride=1, padding=1, groups=hidden_features*2, bias=bias)
 
-        self.project_out = nn.Conv2d(hidden_features, dim, kernel_size=1, bias=bias)
+        self.project_out = nn.Conv2d(hidden_features*2, dim, kernel_size=1, bias=bias)
 
     def forward(self, x, y):
         #x = self.project_in(x)
@@ -141,10 +148,15 @@ class FeedForward_DE(nn.Module):
         y = self.project_in_y(y)
         xy = torch.cat([y,x],dim=1)
         x1, x2 = self.dwconv(xy).chunk(2, dim=1)
-        x = F.gelu(x1) * x2
-        x = self.project_out(x)
+        x_1 = F.gelu(x1) * x2
+        x_2 = F.gelu(x2) * x1
+        x = self.project_out(torch.cat([x_1,x_2],dim=1))
         return x
 
+
+
+##########################################################################
+## Multi-DConv Head Transposed Self-Attention (MDTA)
 class Attention(nn.Module):
     def __init__(self, dim, num_heads, bias):
         super(Attention, self).__init__()
@@ -197,9 +209,9 @@ class Attention_DE(nn.Module):
 
     def forward(self, x, y):
         b,c,h,w = x.shape
-        q = self.q_conv(x)
-        k = self.k_conv(y)
-        v = self.v_conv(y)
+        q = self.q_conv(y)
+        k = self.k_conv(x)
+        v = self.v_conv(x)
         qkv = self.qkv_dwconv(torch.cat([q,k,v],dim=1))
         #qkv = self.qkv_dwconv(self.qkv(x))
         q,k,v = qkv.chunk(3, dim=1)   
@@ -223,6 +235,46 @@ class Attention_DE(nn.Module):
 
 
 ##########################################################################
+class TransformerBlock(nn.Module):
+    def __init__(self, dim, num_heads, ffn_expansion_factor, bias, LayerNorm_type):
+        super(TransformerBlock, self).__init__()
+
+        self.norm1 = LayerNorm(dim, LayerNorm_type)
+        self.attn = Attention(dim, num_heads, bias)
+        self.norm2 = LayerNorm(dim, LayerNorm_type)
+        self.ffn = FeedForward(dim, ffn_expansion_factor, bias)
+
+    def forward(self, x):
+        x = x + self.attn(self.norm1(x))
+        x = x + self.ffn(self.norm2(x))
+
+        return x
+
+class TransformerBlock_HDR(nn.Module):
+    def __init__(self, dim, num_heads, ffn_expansion_factor, bias, LayerNorm_type):
+        super(TransformerBlock_HDR, self).__init__()
+
+        self.norm1 = LayerNorm(dim, LayerNorm_type)
+        self.attn = Attention(dim, num_heads, bias)
+        self.rcab = RCAB(dim)
+        #print(dim)
+        self.norm2 = LayerNorm(dim*2, LayerNorm_type)
+        self.ffn = FeedForward_HDR(dim*2, dim, bias)
+
+    def forward(self, x):
+        x_identity = x
+        u = x_identity + self.attn(self.norm1(x))
+        #print(u.shape)
+        v = x_identity + self.rcab(x)
+        #print(v.shape)
+        uv = torch.cat([u,v],dim=1)
+        #print(uv.shape)
+        #x = x + self.ffn(self.norm2(x))
+        x = self.norm2(uv)
+        #print(x.shape)
+        x = self.ffn(x)
+
+        return x
 
 class TransformerBlock_EN(nn.Module):
     def __init__(self, dim, num_heads, ffn_expansion_factor, bias, LayerNorm_type):
@@ -270,6 +322,8 @@ class TransformerBlock_DE(nn.Module):
 
         return out
 
+##########################################################################
+## Overlapped image patch embedding with 3x3 Conv
 class OverlapPatchEmbed(nn.Module):
     def __init__(self, in_c=3, embed_dim=48, bias=False):
         super(OverlapPatchEmbed, self).__init__()
@@ -282,6 +336,9 @@ class OverlapPatchEmbed(nn.Module):
         return x
 
 
+
+##########################################################################
+## Resizing modules
 class Downsample(nn.Module):
     def __init__(self, n_feat):
         super(Downsample, self).__init__()
@@ -303,42 +360,6 @@ class Upsample(nn.Module):
         return self.body(x)
 
 
-
-class LocalMergingUnit(nn.Module):
-    ##Linear along H
-    def __init__(self, n_dim, scale_factor=1):
-        super(LocalMergingUnit, self).__init__()
-        self.n_dim = n_dim
-        self.scale_factor=scale_factor
-        #if scale_factor!=1:
-        #    self.up1 = nn.ConvTranspose2d(128,n_dim,kernel_size=4, stride=1, padding=1)
-        #    self.up2 = nn.ConvTranspose2d(128,n_dim,kernel_size=4, stride=1, padding=1)
-        #    self.up3 = nn.ConvTranspose2d(128,n_dim,kernel_size=4, stride=1, padding=1)
-        #nChannels_ = nChannels
-        self.conv1 = nn.Conv2d(128,n_dim,kernel_size=1)
-        self.conv2 = nn.Conv2d(128,n_dim,kernel_size=1)
-        self.conv3 = nn.Conv2d(128,n_dim,kernel_size=1)
-        self.lrelu = nn.LeakyReLU(0.2)
-        self.softmax2d = nn.Softmax2d()
-        self.sigmoid = nn.Sigmoid()
-    def forward(self, input_feats, local_feats):
-        if self.scale_factor==1:
-            local_1 = self.conv1(local_feats[0])
-            local_2 = self.conv2(local_feats[1])
-            local_3 = self.conv3(local_feats[2])
-        else:
-            local_1 = self.conv1(F.interpolate(local_feats[0],scale_factor=self.scale_factor))
-            local_2 = self.conv2(F.interpolate(local_feats[1],scale_factor=self.scale_factor))
-            local_3 = self.conv3(F.interpolate(local_feats[2],scale_factor=self.scale_factor))
-        local_1 = self.sigmoid(local_1)
-        local_2 = self.sigmoid(local_2)
-        local_3 = self.sigmoid(local_3)
-        input_feat1 = input_feats[0]*local_1
-        input_feat2 = input_feats[1]*local_2
-        input_feat3 = input_feats[2]*local_3
-
-        local_merged = input_feat1 + input_feat2 + input_feat3
-        return local_merged
 
 class GlobalMergingUnit(nn.Module):
     ##Linear along H
@@ -362,7 +383,26 @@ class GlobalMergingUnit(nn.Module):
         #print(input_feats[0].shape)
         global_merged = torch.sum(torch.stack(input_feats, dim=1) * global_attention_vectors, dim=1)
         return global_merged
-        
+
+
+
+class SpatialAttention(nn.Module):
+    def __init__(self, dim):
+        super(SpatialAttention, self).__init__()
+        self.act = nn.LeakyReLU()
+        self.conv1 = nn.Conv2d(dim*2, dim, kernel_size=3, padding=1)
+        self.conv2 = nn.Conv2d(dim, dim, kernel_size=3, padding=1)
+    def forward(self, inp, ref):
+        cat = torch.cat([inp,ref], dim=1)
+        feat = self.conv1(cat)
+        feat = self.act(feat)
+        feat = self.conv2(feat)
+        feat = F.sigmoid(feat)
+        return inp * feat
+
+
+
+
 class MultiscaleAlign(nn.Module):
     def __init__(self, dim):
         super(MultiscaleAlign, self).__init__()
@@ -412,28 +452,15 @@ class MultiscaleAlign(nn.Module):
 
         feat = F.sigmoid(x_mask)
         return inp * feat
-        
-class SpatialAttention(nn.Module):
-    def __init__(self, dim):
-        super(SpatialAttention, self).__init__()
-        self.act = nn.LeakyReLU()
-        self.conv1 = nn.Conv2d(dim*2, dim, kernel_size=3, padding=1)
-        self.conv2 = nn.Conv2d(dim, dim, kernel_size=3, padding=1)
-    def forward(self, inp, ref):
-        cat = torch.cat([inp,ref], dim=1)
-        feat = self.conv1(cat)
-        feat = self.act(feat)
-        feat = self.conv2(feat)
-        feat = F.sigmoid(feat)
-        return inp * feat
-    
+
+
 class RFGViT(nn.Module):
     def __init__(self, 
         inp_channels=6, 
         dim = 32,
         num_blocks = [1,1,1,4], 
         num_refinement_blocks = 4,
-        ffn_expansion_factor = 2.66,
+        ffn_expansion_factor = 4.00,
         bias = False,
         LayerNorm_type = 'WithBias',   ## Other option 'BiasFree'
     ):
@@ -444,6 +471,8 @@ class RFGViT(nn.Module):
         self.patch_embed2 = OverlapPatchEmbed(inp_channels, dim)
         self.patch_embed3 = OverlapPatchEmbed(inp_channels, dim)
 
+        #self.sp_att1 = SpatialAttention(dim)
+        #self.sp_att3 = SpatialAttention(dim)
         self.sp_att1 = MultiscaleAlign(dim)
         self.sp_att3 = MultiscaleAlign(dim)
 
@@ -489,9 +518,9 @@ class RFGViT(nn.Module):
         self.global_merge1 = GlobalMergingUnit(dim)
         self.global_merge2 = GlobalMergingUnit(dim*2)
         self.global_merge3 = GlobalMergingUnit(dim*4)
-        self.local_merge1 = LocalMergingUnit(dim,scale_factor=4)
-        self.local_merge2 = LocalMergingUnit(dim*2,scale_factor=2)
-        self.local_merge3 = LocalMergingUnit(dim*4)
+        #self.local_merge1 = LocalMergingUnit(dim,scale_factor=4)
+        #self.local_merge2 = LocalMergingUnit(dim*2,scale_factor=2)
+        #self.local_merge3 = LocalMergingUnit(dim*4)
     def forward(self, x1, x2, x3, local_feats, global_feats ):
 
         F1_1 = self.patch_embed1(x1)
