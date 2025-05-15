@@ -29,7 +29,7 @@ val_loader = DataLoader(val_dataset, batch_size=1, shuffle=False, num_workers=4,
 model = RFGViT().cuda()
 
 moco = MoCo(base_encoder=Encoder,T=0.5).cuda()
-moco.load_state_dict(torch.load("./encoders/encoder.pth"))
+moco.load_state_dict(torch.load("./checkpoints/encoder.pth"))
 moco_encoder = moco.encoder_q.cuda()
 moco_encoder.eval()
 
@@ -46,7 +46,7 @@ total_psnr_l=0.
 total_ssim_l=0.
 total_ssim_m=0.
 
-model.load_state_dict(torch.load("./models/RFGVIT.pth"))
+model.load_state_dict(torch.load("./checkpoints/RFGVIT.pth"))
 total_psnr=0.
 total_psnr_l=0.
 total_ssim_l=0.
