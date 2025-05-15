@@ -97,7 +97,7 @@ for idx,i in enumerate(val_loader):
     avg_psnr_l = total_psnr_l/len(val_loader)
     avg_ssim_mu = total_ssim_m/len(val_loader)
     avg_ssim_l = total_ssim_l/len(val_loader)
-    print(len(val_loader))
+    #print(len(val_loader))
 print("Test PSNR M: ",avg_psnr_mu)
 print("Test PSNR L: ",avg_psnr_l)
 print("Test SSIM M: ",avg_ssim_mu)
