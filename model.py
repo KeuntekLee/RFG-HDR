@@ -236,34 +236,37 @@ class TransformerBlock_EN(nn.Module):
     def forward(self, x):
         #print("EN")
         x_identity = x
-        global_feat = self.attn(self.norm1(x))
-        local_feat = self.ffn(self.norm2(x))
-        out = self.project_out(torch.cat([global_feat,local_feat],dim=1))
+        ta = self.attn(self.norm1(x))
+        sg = self.ffn(self.norm2(x))
+        #x = x + self.attn(self.norm1(x))
+        #x = x + self.ffn(self.norm2(x))
+        out = self.project_out(torch.cat([ta,sg],dim=1))
         out = out+x_identity
-        return out, local_feat, global_feat
-
+        return out
 
 class TransformerBlock_DE(nn.Module):
     def __init__(self, dim, num_heads, ffn_expansion_factor, bias, LayerNorm_type):
         super(TransformerBlock_DE, self).__init__()
         #print("DE!")
-        # self.norm1 = LayerNorm(dim, LayerNorm_type)
+        self.norm1 = LayerNorm(dim, LayerNorm_type)
         self.norm2 = LayerNorm(dim, LayerNorm_type)
-        # self.attn = Attention(dim, num_heads, bias)
+        self.attn = Attention(dim, num_heads, bias)
         self.cross_attn = Attention_DE(dim, num_heads, bias)
         self.norm3 = LayerNorm(dim, LayerNorm_type)
+        self.norm4 = LayerNorm(dim, LayerNorm_type)
+        self.norm5 = LayerNorm(dim, LayerNorm_type)
         self.ffn = FeedForward_DE(dim, ffn_expansion_factor, bias)
         self.project_out = nn.Conv2d(dim*2, dim, kernel_size=1, bias=bias)
-    def forward(self, x, local_M, global_M):
+    def forward(self, x, global_M):
         #print("DE")
         x_identity = x
-        # x = self.attn(self.norm1(x))
-        # x = x + x_identity
-        # x_identity = x
-        global_feat = self.cross_attn(self.norm2(x), global_M)
-        local_feat = self.ffn(self.norm3(x), local_M)
-        out = self.project_out(torch.cat([global_feat,local_feat],dim=1))
-        out = out+x_identity
+        x = self.attn(self.norm1(x))
+        x = x + x_identity
+        x_identity = x
+        ta = self.cross_attn(self.norm2(x), self.norm4(global_M))
+        sg = self.ffn(self.norm3(x), self.norm5(global_M))
+        out = self.project_out(torch.cat([ta,sg],dim=1))
+        out = out + x_identity
 
         return out
 
