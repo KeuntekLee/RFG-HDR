@@ -26,7 +26,18 @@ Multi-exposure fusion is a high dynamic range (HDR) imaging technique that combi
 ### Test
 
 ```
-python test.py
+python test_RFGViT.py
 ```
 
 ## Citation
+
+```
+@inproceedings{lee2024rfg,
+  title={RFG-HDR: Representative Feature-Guided Transformer For Multi-Exposure High Dynamic Range Imaging},
+  author={Lee, Keuntek and Park, Jaehyun and Park, Gu Yong and Cho, Nam Ik},
+  booktitle={2024 IEEE International Conference on Image Processing (ICIP)},
+  pages={1521--1527},
+  year={2024},
+  organization={IEEE}
+}
+```
